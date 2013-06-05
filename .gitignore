@@ -163,5 +163,6 @@ pip-log.txt
 .DS_Store
 
 # Custom ignores
-admin.txt
-tits.txt*
+admins.txt
+tits.txt
+tits.txt.org

@@ -1,8 +1,5 @@
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
-import java.io.Console;
 import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -14,18 +11,13 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLConnection;
 import java.net.UnknownHostException;
-import java.nio.Buffer;
-import java.nio.CharBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,15 +25,15 @@ import java.util.Properties;
 import java.util.Random;
 import java.util.Timer;
 import java.util.TimerTask;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import javax.swing.text.html.HTMLDocument;
 import javax.swing.text.html.HTMLEditorKit;
 
+import org.jibble.pircbot.Colors;
 import org.jibble.pircbot.IrcException;
 import org.jibble.pircbot.NickAlreadyInUseException;
 import org.jibble.pircbot.PircBot;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -51,6 +43,7 @@ public class Bot extends PircBot {
 	private Map<String,Command.Flags> UserLevels = new HashMap<String,Command.Flags>();
 	private Map<String,Integer> BadURLs = new HashMap<String,Integer>();
 	public Properties botSettings = new Properties();
+	private int TorrentID = -1;
 	
 	public Bot() {
 		initData();
@@ -63,6 +56,7 @@ public class Bot extends PircBot {
 			this.setName("propertyError");
 		}
 		
+		//auto delete 404'd images
 		Timer t = new Timer();
 		t.scheduleAtFixedRate(new TimerTask() {
 			@Override
@@ -86,6 +80,21 @@ public class Bot extends PircBot {
 				SaveList("links");
 			}
 		}, 1000*60*2, 12*60*60*1000);
+		
+		//torrent announce 1000*60 is 1 min (1000 is 1 second so if you want to change the time keep that in mind)
+		if(Boolean.parseBoolean(botSettings.getProperty("torrent_announce").toString())) {
+			Timer t2 = new Timer();
+			t2.scheduleAtFixedRate(new TimerTask() {
+				@Override
+				public void run() {
+					String msg = "";
+					if((msg = checkAnnounce(TorrentID)) != "Error") {
+						sendMessage("#"+botSettings.getProperty("bot_chan"),msg);
+					}
+				}
+	
+			}, 1000*60,1000*60);
+		}
 	}
 	
 	@SuppressWarnings("unchecked")
@@ -181,7 +190,7 @@ public class Bot extends PircBot {
 		
 		c = new Command();
 		c.setCmdName(".imdb");
-		c.setDescription("Enter a movie title and get some info about the movie from IMDB. (i.e. .imdb Star Wars");
+		c.setDescription("Enter a movie title and get some info about the movie from IMDB. (i.e. .imdb Star Wars). optionally use the -y flag for the year (i.e. .imdb star wars -y 1977");
 		c.setUserFlags(Command.Flags.USER);
 		c.setHidden(false);
 		c.setEnabled(true);
@@ -281,6 +290,57 @@ public class Bot extends PircBot {
 		
 	}
 	
+	public void onPrivateMessage(String sender, String login, String hostname, String message) {
+		
+		if(message.equalsIgnoreCase(this.botSettings.getProperty("invite_phrase"))) {
+			this.sendInvite(sender, "#"+this.botSettings.getProperty("bot_chan"));
+		} else if(UserLevels.containsKey(sender.toLowerCase())) {
+			String[] args = message.split(" ");
+			switch(args[0]) {
+				case "join":
+					this.joinChannel(args[1]);
+					break;
+				
+				case "part":
+					if(args.length > 2) {
+						this.partChannel(args[1], args[2]);
+					} else	{
+						this.partChannel(args[1]);
+					}
+					break;
+					
+				case "add":
+					if (UserLevels.get(sender.toLowerCase()) == Command.Flags.ADMIN) {
+						sendMessage(sender,addCommand(args,true,sender));
+					} else {
+						sendMessage(sender,"You do not have proper permissions");
+					}
+					break;
+					
+				case "info":
+					sendMessage(sender, getInfo(args[1]));
+					break;
+				
+				//this is for the /me command. so for this case you would pm your bot and type me does this and that
+				//and itll send botname does this and that into the chat specified in settings
+				case "me":
+					this.sendAction("#" + this.botSettings.getProperty("bot_chan"), message.substring(3));
+					break;
+					
+				case "say":
+					this.sendMessage("#" + this.botSettings.getProperty("bot_chan"), message.substring(4));
+					break;
+			}
+		}
+	}
+	
+	public void onRemoveInviteOnly(String channel, String sourceNick, String sourceLogin, String sourceHostname) {
+		if(Boolean.parseBoolean(this.botSettings.getProperty("invite_only")) && 
+				channel == "#"+this.botSettings.getProperty("bot_chan")) {
+			this.setMode(channel, "+i");
+		}
+	}
+	
 	public void onMessage(String channel, String sender, String login, 
 						String hostname, String message) {
 
@@ -291,19 +351,54 @@ public class Bot extends PircBot {
 			doCommand(message,channel,sender);
 		}
 		
+		// Testing a little bit of "AI"
+		if(message.startsWith(this.botSettings.getProperty("bot_nick").toString())) {
+			AI chica = new AI();
+			String[] args = message.split(" ");
+			if(args.length == 1) {
+				if(sender.equalsIgnoreCase(this.botSettings.getProperty("owner_nick"))) {
+					sendMessage(channel,"Sup bro, what can I do for you?");
+				} else {
+					sendMessage(channel,chica.grabGreeting());
+				}
+			} else if(chica.isReceiveString(Arrays.asList(Arrays.copyOfRange(args, 1, args.length / 2)))) {
+				int nickindx = chica.getReceiveIndex(Arrays.asList(args));
+				String strnick = args[nickindx + 1];
+				if (strnick.equalsIgnoreCase("me")) {
+					strnick = "";
+				}
+				if(Arrays.asList(Arrays.copyOfRange(args, args.length / 2,args.length)).contains("nsfw")) {
+					if(chica.isAdditionString(Arrays.asList(Arrays.copyOfRange(args, Arrays.asList(args).indexOf("nsfw"), args.length)))) {
+						String[] tags = args[args.length -1].split(",");
+						sendMessage(channel,strnick+ " " + chica.grabResponse() + ". " + getLinks(Links.SourceCategory.NSFW,tags));						
+					} else {
+						sendMessage(channel,strnick+ " " + chica.grabResponse() + ". " + getLinks(Links.SourceCategory.NSFW));
+					}
+				} else if(Arrays.asList(Arrays.copyOfRange(args, args.length / 2,args.length)).contains("funny")) {
+					if(chica.isAdditionString(Arrays.asList(Arrays.copyOfRange(args, Arrays.asList(args).indexOf("funny"), args.length)))) {
+						String[] tags = args[args.length -1].split(",");
+						sendMessage(channel,strnick+ " " + chica.grabResponse() + ". " + getLinks(Links.SourceCategory.FUNNYS,tags));						
+					} else {
+						sendMessage(channel,strnick+ " " + chica.grabResponse() + ". " + getLinks(Links.SourceCategory.FUNNYS));
+					}
+				} else if(Arrays.asList(Arrays.copyOfRange(args, args.length / 2,args.length)).contains("brolinx")) {
+					if(chica.isAdditionString(Arrays.asList(Arrays.copyOfRange(args, Arrays.asList(args).indexOf("brolinx"), args.length)))) {
+						String[] tags = args[args.length -1].split(",");
+						sendMessage(channel,strnick+ " " + chica.grabResponse() + ". " + getLinks(Links.SourceCategory.YOUTUBE,tags));						
+					} else {
+						sendMessage(channel,strnick+ " " + chica.grabResponse() + ". " + getLinks(Links.SourceCategory.YOUTUBE));
+					}
+				}
+				
+			}
+		}
+		
 		
 		if(Boolean.parseBoolean(botSettings.getProperty("youtube_announce"))) {
-		/* regex alts
-		 * 
-		 * (http?s://)?(www\\.)?(youtube\\.com/|youtu\\.be/)watch\\?v=[a-zA-Z0-9-_]{11}
-		 * 
-		 * (?:https?://)?(?:www\\.)?(?:youtube\\.com/watch\\?v=|youtu\\.be/)[a-zA-Z0-9-_]{11}(&(.+))?
-		 * 
-		 * https?:\\/\\/(?:[0-9A-Z-]+\\.)?(?:youtu\\.be\\/|youtube\\.com\\S*[^\\w\\-\\s])([\\w\\-]{11})(?=[^\\w\\-]|$)(?![?=&+%\\w]*(?:['\"][^<>]*>|<\\/a>))[?=&+%\\w]*
-		 */
-			String pattern = "(?:https?://)?(?:www\\.)?(?:youtube\\.com/watch\\?v=|youtu\\.be/)[a-zA-Z0-9-_]{11}(&(.+))?";
-			Pattern compiledPattern = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
-			if(message.trim().matches(compiledPattern.toString())) {
+			
+			//String pattern = "(?:https?://)?(?:www\\.)?(?:youtube\\.com/watch\\?v=|youtu\\.be/)[a-zA-Z0-9-_]{11}(&(.+))?";
+			//Pattern compiledPattern = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
+			//if(message.trim().matches(compiledPattern.toString())) {
 				try {
 					URL url = new URL(message);
 					URLConnection conn = url.openConnection();
@@ -317,8 +412,9 @@ public class Bot extends PircBot {
 					htmlkit.read(br, htmlDoc, 0);
 					
 					String title = (String) htmlDoc.getProperty(HTMLDocument.TitleProperty);
-					
-					sendMessage(channel, title);
+					if(title.contains("YouTube")) {
+						sendMessage(channel, title);
+					}
 					
 					br.close();
 					isr.close();
@@ -327,7 +423,7 @@ public class Bot extends PircBot {
 				catch (Exception ex) {
 					System.out.print(ex.getCause() + "|| " + ex.getMessage());
 				}
-			}
+			//}
 		}
 	}
 	
@@ -335,7 +431,7 @@ public class Bot extends PircBot {
 		if(Boolean.parseBoolean(botSettings.getProperty("auto_identify"))) {
 			this.identify(botSettings.getProperty("bot_password"));
 		}
-		this.joinChannel("#" + botSettings.getProperty("bot_chan"));
+			this.joinChannel("#" + botSettings.getProperty("bot_chan"));
 	}
 	
 	private void doCommand(String cmd, String chan, String sender) {
@@ -357,11 +453,11 @@ public class Bot extends PircBot {
 				
 				switch(args[0]) {
 					case ".help":
-						showHelp(args,chan);
+						showHelp(args,sender);
 						break;
 						
 					case ".commands":
-						showCommands(chan);
+						showCommands(sender);
 						break;
 						
 					case ".nsfw":
@@ -404,9 +500,9 @@ public class Bot extends PircBot {
 						
 					case ".add":
 						if (UserLevels.get(sender.toLowerCase()) == Command.Flags.ADMIN) {
-							sendMessage(chan,addCommand(args,true));
+							sendMessage(chan,addCommand(args,true,sender));
 						} else {
-							sendMessage(chan,addCommand(args,false));
+							sendMessage(chan,addCommand(args,false,sender));
 						}
 						
 						break;
@@ -428,7 +524,7 @@ public class Bot extends PircBot {
 	}
 	
 // ------------------- Functions for commands ------------------------------------	
-	private void showHelp(String[] args, String channel) {
+	private void showHelp(String[] args, String sender) {
 		String msg = "Help requested! If you need help with a specific command; Try .help <command name> or .commands to see a list of available commands.";
 		
 		if(args.length > 1) {
@@ -439,10 +535,10 @@ public class Bot extends PircBot {
 			}
 		}
 		
-		sendMessage(channel,msg);
+		sendNotice(sender,msg);
 	}
 	
-	private void showCommands(String chan) {
+	private void showCommands(String sender) {
 		String lst = "";
 		
 		for(Command c:CmdList) {
@@ -452,12 +548,12 @@ public class Bot extends PircBot {
 		}
 		
 		lst = lst.substring(0,lst.length() - 2);
-		sendMessage(chan,lst);
+		sendNotice(sender,lst);
 	}
 	
 	private String getLinks(Links.SourceCategory cat,String[]... args) {
 		try {
-			List<String> temp = null;
+			List<Links> temp = null;
 			
 			if(args.length > 0) {
 				temp = ReturnList(cat, args);
@@ -467,7 +563,7 @@ public class Bot extends PircBot {
 			
 			Random rand = new Random();
 			if(!temp.isEmpty()) {
-				return temp.get(rand.nextInt(temp.size()));
+				return temp.get(rand.nextInt(temp.size())).getLink();
 			}
 			
 			return "Unfortunately, I couldn't locate any links that were up your alley.";
@@ -476,8 +572,18 @@ public class Bot extends PircBot {
 		}
 	}
 	
-	private List<String> ReturnList(Links.SourceCategory cat, String[]... args) {
-		List<String> temp = new ArrayList<String>();
+	private String getInfo(String link) {
+		for(Links l:LinkList) {
+			if(link.equals(l.getLink())) {
+				return "\u0002ID:\u0002 " + LinkList.indexOf(l) + " \u0002Submitted By:\u0002 " + l.getSubmitter() + " \u0002Tags:\u0002 " + l.getArgs();
+			}
+		}
+		
+		return "Couldn't locate link in the database.";
+	}
+	
+	private List<Links> ReturnList(Links.SourceCategory cat, String[]... args) {
+		List<Links> temp = new ArrayList<Links>();
 		for(Links l:LinkList) {
 			if(l.getCat() == cat) {
 				if(args.length > 0) {
@@ -488,13 +594,20 @@ public class Bot extends PircBot {
 						} else {
 							tags.add(l.getArgs().toLowerCase());
 						}
-					
-						if(tags.contains(args[0][1].toLowerCase())) {
-							temp.add(l.getLink());
+						
+						
+						if(args[0].length == 1) {
+							if(tags.contains(args[0][0].toLowerCase())) {
+								temp.add(l);
+							} 
+						} else {
+							if(tags.contains(args[0][1].toLowerCase())) {
+								temp.add(l);
+							}
 						}
 					}
 				} else {
-					temp.add(l.getLink());
+					temp.add(l);
 				}
 			}
 		}
@@ -511,7 +624,7 @@ public class Bot extends PircBot {
 		Integer usrlvl = 0;
 		Integer cmdlvl = levels.get(Level);
 		if(UserLevels.containsKey(sender.toLowerCase())) {
-			Command.Flags flag = UserLevels.get(sender);
+			Command.Flags flag = UserLevels.get(sender.toLowerCase());
 			usrlvl = levels.get(flag);
 		}
 		
@@ -680,7 +793,7 @@ public class Bot extends PircBot {
 		}
 	}
 	
-	private String addCommand(String[] args,Boolean admin) {
+	private String addCommand(String[] args,Boolean admin,String sender) {
 		String msg = "WTF Just happened!... Ah shit there must have been an error.";
 		switch(args[1]) {
 			case "user":
@@ -695,16 +808,19 @@ public class Bot extends PircBot {
 				}
 				break;
 				
+			case "nsfw":
 			case "tits":
-				msg = addLinks(Links.SourceCategory.NSFW,args);
+				msg = addLinks(Links.SourceCategory.NSFW,args,sender);
 				break;
 				
 			case "brolinx":
-				msg = addLinks(Links.SourceCategory.YOUTUBE,args);
+				msg = addLinks(Links.SourceCategory.YOUTUBE,args,sender);
 				break;
 				
+			case "lulz":
+			case "lolol":
 			case "lawlz":
-				msg = addLinks(Links.SourceCategory.FUNNYS,args);
+				msg = addLinks(Links.SourceCategory.FUNNYS,args,sender);
 				break;
 		}
 		
@@ -739,9 +855,10 @@ public class Bot extends PircBot {
 		}
 	}
 	
-	private String addLinks(Links.SourceCategory cat,String[] args) {
+	private String addLinks(Links.SourceCategory cat,String[] args,String sender) {
 		Links l = new Links(cat,args[2]);
-		if(args[3] != null) {
+		l.setSubmitter(sender);
+		if(args.length > 3) {
 			l.setArgs(args[3]);
 		}
 		
@@ -780,14 +897,17 @@ public class Bot extends PircBot {
 		}
 		
 		return "There are " + Integer.toString(n) + " NSFW links, " + Integer.toString(y) + 
-				" Brolinx links, and " + Integer.toString(l) + " LOLOL links.";
+				" Brolinx links, and " + Integer.toString(l) + " Funnies links.";
 	}
 	
 	private Boolean check404(String strURL) {
 		HttpURLConnection conn;
+		HttpURLConnection.setFollowRedirects(false);
 		try {
 			conn = (HttpURLConnection)new URL(strURL).openConnection();
 			if(conn.getResponseCode() == 404){
+				return true;
+			} else if(strURL.contains("imgur") && conn.getResponseCode() == 302){
 				return true;
 			} else {
 				return false;
@@ -817,18 +937,39 @@ public class Bot extends PircBot {
 	 
 	private String getIMDBdata(String[] args) {
 		try {
-			String apiURL = "http://www.omdbapi.com/?t=";
+			String apiURL = "http://www.omdbapi.com/?s=";
 			String moviename = "";
-			if(args.length > 2) {
-				for(String s:args) {
-					moviename += s + "+";
+			Boolean hasYear = false;
+			String year = "";
+			
+			for(int i = 1; i < args.length; i++) {
+				if(args[i].startsWith("-")) {
+					if(args[i].toLowerCase().endsWith("y")) {
+						hasYear = true;
+						year = args[i+1];
+						args = Arrays.copyOfRange(args,0, i);
+					}
 				}
-				moviename = moviename.substring(5);
+			}
+			
+			if(args.length > 2) {
+				for(int i = 1; i < args.length; i++) {
+					if(i < args.length - 1) {
+						moviename = args[i] + "%20";
+					} else {
+						moviename += args[i];
+					}
+				}
 			}else{
 				moviename = args[1];
 			}
+			moviename = moviename.trim();
 			
-			apiURL += moviename.trim();
+			if(hasYear == false) {
+				apiURL += moviename + "&r=JSON";
+			} else {
+				apiURL += moviename + "&r=JSON&y=" + year;
+			}
 			
 			if(moviename != "") {
 				HttpURLConnection conn = (HttpURLConnection)new URL(apiURL).openConnection();
@@ -844,19 +985,51 @@ public class Bot extends PircBot {
 				
 				in.close();
 				
+				JSONObject data = new JSONObject(response.toString());
+				if(data.has("Error")) {
+					return "\u0002Error:\u0002 " + data.get("Error").toString();
+				} 
+				
+				JSONArray datalist = data.getJSONArray("Search");
+
+				JSONObject movie = new JSONObject();
+				for(int i = 0; i < datalist.length();i++) {
+					if(!datalist.getJSONObject(i).getString("Type").contains("episode")) {
+						movie = datalist.getJSONObject(i);
+						break;
+					}	
+				}
+				
+				if(movie.has("Error")) {
+					return "\u0002Error:\u0002 " + movie.get("Error").toString();
+				}
+				
+				apiURL = "http://www.omdbapi.com/?i=" + movie.get("imdbID").toString();
+				conn = (HttpURLConnection) new URL(apiURL).openConnection();
+				conn.setRequestMethod("GET");
+					
+				in = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+				response = new StringBuffer();
+					
+				while ((inputdata = in.readLine()) != null) {
+					response.append(inputdata);
+				}
+				in.close();
+					
 				JSONObject moviedata = new JSONObject(response.toString());
 				
 				if(moviedata.has("Error")) {
 					return "\u0002Error:\u0002 " + moviedata.get("Error").toString();
-				} else {
-					String msg = "";
-					msg += "\u0002Title:\u0002 " + moviedata.get("Title") + " ";
-					msg += "\u0002Year:\u0002 " + moviedata.get("Year") + " ";
-					msg += "\u0002IMDB Rating:\u0002 " + moviedata.get("imdbRating") + " ";
-					msg += "\u0002URL:\u0002 " + "http://www.imdb.com/title/" + moviedata.get("imdbID");
-					
-					return msg;
 				}
+					
+				String msg = "";
+				msg += "\u0002Title:\u0002 " + moviedata.get("Title") + " ";
+				msg += "\u0002Year:\u0002 " + moviedata.get("Year") + " ";
+				msg += "\u0002IMDB Rating:\u0002 " + moviedata.get("imdbRating") + " ";
+				msg += "\u0002URL:\u0002 " + "http://www.imdb.com/title/" + moviedata.get("imdbID");
+					
+				return msg;
+				
 			} else {
 				return "Don't fuck with me...Enter a movie name";
 			}
@@ -869,6 +1042,58 @@ public class Bot extends PircBot {
 		} catch (JSONException e) {
 			// TODO Auto-generated catch block
 			return e.getMessage();
+		}
+	}
+	
+	private String checkAnnounce(int torrentID) {
+		try{
+			String TorURL = this.botSettings.getProperty("announce_url").toString() + torrentID;
+			HttpURLConnection conn = (HttpURLConnection)new URL(TorURL).openConnection();
+			conn.setRequestMethod("GET");
+			
+			BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+			String inputdata;
+			StringBuffer response = new StringBuffer();
+			
+			while ((inputdata = in.readLine()) != null) {
+				response.append(inputdata);
+			}
+			
+			in.close();
+			
+			
+			JSONArray data = new JSONArray(response.toString());
+			
+			String msg = "";
+			msg += Colors.PURPLE + Colors.UNDERLINE + "Title:" + Colors.NORMAL + " " + data.getJSONObject(0).get("torrent") + " ";
+			msg += Colors.PURPLE + Colors.UNDERLINE + "URL:" + Colors.NORMAL + " " + botSettings.getProperty("torrent_url_prefix").toString() + data.getJSONObject(0).get("uri") + " ";
+			
+			String[] tags = data.getJSONObject(0).get("tags").toString().split(" ");
+			String strtags = "";
+			for(int i = 0; i < tags.length; i++)
+			{
+				if(i < 5) {
+					strtags += tags[i] + " ";
+				}
+			}
+			msg += Colors.PURPLE + Colors.UNDERLINE + "Tags:" + Colors.NORMAL + " " + strtags;
+			
+			if(torrentID != Integer.parseInt(data.getJSONObject(0).get("id").toString())) {
+				TorrentID = Integer.parseInt(data.getJSONObject(0).get("id").toString()); 
+			
+				return msg;
+			} else {
+				return "";
+			}
+		} catch (MalformedURLException e) {
+			// TODO Auto-generated catch block
+			return "Error";
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			return "Error";
+		} catch (JSONException e) {
+			// TODO Auto-generated catch block
+			return "Error";
 		}
 	}
 
